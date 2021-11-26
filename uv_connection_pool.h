@@ -35,6 +35,7 @@ enum socket_state {
     INUSED,
 };
 
+// context of close the socket
 struct close_socket_ctx {
     struct socket_info * si;
     close_socket_cb cb;
@@ -60,20 +61,32 @@ struct socket_info
 // pool
 struct pool
 {   
+    // use by user to bind some context
     void * ctx;
+    // the loop that the pool belong to
     uv_loop_t * loop;
+    // connection list
     struct socket_info** sockets;
+    // max connection
     int size;
+    // connection in use
     int use;
+    // address information of all connection in pool
     char* host;
     int port;
+    // the queue keep the consumer when the pool have not connection to be used
     struct node* wait;
+    // we can not wait forever, so we need to emit timeout when the connection is not available for a period of time (time is defined by user) 
     uv_timer_t wait_timer;
+    // interval for re_connection
     u_int64_t re_connection_interval;
+    // max times for reconnect
     int max_re_connection_times;
+    // we will reconnect when connection is failed
     uv_timer_t re_connection_timer;
 };
 
+// pool options for control the pool
 struct pool_options {
     int size;
     char* host;

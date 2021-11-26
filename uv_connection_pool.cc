@@ -84,6 +84,7 @@ struct pool * create_pool(uv_loop_t * loop, struct pool_options * options) {
     p->max_re_connection_times = options->max_re_connection_times ? options->max_re_connection_times : 10;
     uv_timer_init(p->loop, &p->wait_timer);
     uv_timer_init(p->loop, &p->re_connection_timer);
+    // make it unref because it should not prevent uv_run from stopping
     uv_unref((uv_handle_t *)&p->wait_timer);
     p->wait_timer.data = (void *)p;
     p->re_connection_timer.data = (void *)p;
@@ -97,6 +98,7 @@ struct pool * create_pool(uv_loop_t * loop, struct pool_options * options) {
     return p;
 }
 
+// get socket info ny socket id
 struct socket_info * get_socket_info(struct pool * p, int id) {
     return p->sockets[id];
 }
@@ -114,6 +116,7 @@ int get_socket(struct pool * p) {
     return -1;
 }
 
+// we have a idle connection, consume it if someone need it
 static void consume_socket(struct socket_info* si) {
     struct pool * p = si->p;
     struct node * n = p->wait;
@@ -122,6 +125,7 @@ static void consume_socket(struct socket_info* si) {
         n->cb(OK, si->index);
         free(n);
     }
+    // stop timer when have not consumer, otherwise update this timer by the timeout of new consumer
     if (p->wait == NULL) {
         uv_timer_stop(&p->wait_timer);
     } else {
@@ -146,6 +150,9 @@ static void connect_cb(uv_connect_t* req, int status) {
 }
 
 static void start_connect(struct pool* p) {
+    if (p->wait == NULL) {
+        return;
+    }
     for (int i = 0; i < p->size; i++) {
         if (p->sockets[i] == NULL) {
             struct sockaddr_in dest;
@@ -255,6 +262,7 @@ int close_socket(struct pool *p, int id, close_socket_cb cb) {
     si->socket->data = (void*)ctx;
     p->use--;
     uv_close((uv_handle_t*)si->socket, close_cb);
+    start_connect(p);
     return OK;
 }
 

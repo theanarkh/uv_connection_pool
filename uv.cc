@@ -7,7 +7,6 @@ void on_write(int status) {
     printf("on_write %d \n", status);
 }
 
-
 void on_read(int nread, const uv_buf_t * buf) {
     if (nread == -1) {
         return;
