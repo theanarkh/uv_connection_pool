@@ -2,7 +2,7 @@
 
 uv_loop_t * loop = uv_default_loop();
 struct pool* p;
-
+int socket_id;
 void on_write(int status) {
     printf("on_write %d \n", status);
 }
@@ -13,35 +13,35 @@ void on_read(int nread, const uv_buf_t * buf) {
         return;
     }
     printf("%d %s \n", nread, buf->base);
+    printf("%s", get_socket_info(p, socket_id)->ctx);
     free(buf->base);
-    // write_socket((uv_tcp_t *)data, "hello", on_write);
 }
 
 void onconnect(result ret, int id) {
     if (ret != OK) {
-        printf("connect error");
+        printf("connect error: %d\n", ret);
         return;
     }
-    write_socket(p, id, "hello", on_write);
+    socket_id = id;
+    const char * data = "hello"; 
+    write_socket(p, id, (char *)data, on_write);
+    shutdown_socket(p, socket_id, NULL);
     read_socket(p, id, on_read);
+    attach_ctx(p, id, (void *)data);
 }
 
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
     setvbuf(stderr, nullptr, _IONBF, 0);
+    const char * host = "127.0.0.1";
     struct pool_options options = {
         10,
-        "127.0.0.1",
+        (char *)host,
         8000,
-        10,
+        1000,
         10
     };
     p = create_pool(loop, &options);
-    int id = get_socket(p);
-    if (id == -1) {
-        wait_socket(p, onconnect, 1000);
-    } else {
-        onconnect(OK, id);
-    }
+    wait_socket(p, onconnect, 10000);
     return uv_run(loop, UV_RUN_DEFAULT);
 }

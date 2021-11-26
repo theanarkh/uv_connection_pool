@@ -12,19 +12,20 @@ if (p->sockets[id] == NULL) { \
     return SOCKET_NOT_EXSIT; \
 }
 
-typedef void (*get_socket_cb)(result state, int id);
-typedef void (*write_socket_cb)(int status);
-typedef void (*read_socket_cb)(int nread, const uv_buf_t* buf);
-typedef void (*shutdown_socket_cb)(int status);
-typedef void (*close_socket_cb)();
-
 // code of call function
 enum result {
     OK,
     TIMEOUT,
     NO_MEM,
-    SOCKET_NOT_EXSIT
+    SOCKET_NOT_EXSIT,
+    CONNECT_FAIL
 };
+
+typedef void (*get_socket_cb)(result state, int id);
+typedef void (*write_socket_cb)(int status);
+typedef void (*read_socket_cb)(int nread, const uv_buf_t* buf);
+typedef void (*shutdown_socket_cb)(int status);
+typedef void (*close_socket_cb)();
 
 // state of connection
 enum socket_state {
@@ -82,11 +83,12 @@ struct pool_options {
 };
 
 struct pool * create_pool(uv_loop_t * loop, struct pool_options * options);
+struct socket_info * get_socket_info(struct pool * p, int id); 
 int get_socket(struct pool * p);
 int wait_socket(struct pool * p, get_socket_cb cb, uint64_t timeout);
 int put_socket(struct pool *p, int id);
-int close_socket(struct pool *p, int id);
-int shutdown_socket(struct pool *p, int id, uv_shutdown_cb cb);
+int close_socket(struct pool *p, int id, close_socket_cb cb);
+int shutdown_socket(struct pool *p, int id, shutdown_socket_cb cb);
 int read_socket(struct pool *p, int id, read_socket_cb cb);
 int write_socket(struct pool* p, int id, char * data, write_socket_cb cb);
 int attach_ctx(struct pool* p, int id, void * ctx);

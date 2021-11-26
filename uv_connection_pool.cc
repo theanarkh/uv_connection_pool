@@ -1,5 +1,3 @@
-
-
 #include "uv_connection_pool.h"
 
 static void wait_timer_cb(uv_timer_t* timer);
@@ -12,6 +10,7 @@ static void start_re_connection_timer(struct pool *p);
 static void connect_cb(uv_connect_t* req, int status);
 static void alloc_cb(uv_handle_t* handle, size_t size, uv_buf_t* buf);
 static void read_cb(uv_stream_t* tcp, ssize_t nread, const uv_buf_t* buf);
+static void consume_socket(struct socket_info* si);
 
 static void wait_timer_cb(uv_timer_t* timer) {
     struct pool * p = (struct pool *)timer->data;
@@ -19,14 +18,15 @@ static void wait_timer_cb(uv_timer_t* timer) {
     uint64_t now = uv_now(p->loop);
     bool update = false;
     while(current) {
-        if (current->timeout >= now) {
-            p->wait = current->next;
-            current->next = NULL;
-            current->cb(TIMEOUT, -1);
-            free(current);
-            current = p->wait;
-            update = true;
+        if (current->timeout > now) {
+            break;
         }
+        p->wait = current->next;
+        current->next = NULL;
+        current->cb(TIMEOUT, -1);
+        free(current);
+        current = p->wait;
+        update = true;
     }
     if (update) {
         update_wait_timer(p);
@@ -51,6 +51,18 @@ static void start_re_connection_timer(struct pool *p) {
     if (p->wait == NULL) {
         return;
     }
+    if (p->max_re_connection_times == 0) {
+        struct node * current = p->wait;
+        while(current) {
+            p->wait = current->next;
+            current->next = NULL;
+            current->cb(CONNECT_FAIL, -1);
+            free(current);
+            current = p->wait;
+        }
+        return;
+    }
+    p->max_re_connection_times--;
     u_int64_t now = uv_now(p->loop);
     uv_timer_stop(&p->re_connection_timer);
     uv_timer_start(&p->re_connection_timer, re_connection_timer_cb, p->re_connection_interval, 0);
@@ -72,6 +84,7 @@ struct pool * create_pool(uv_loop_t * loop, struct pool_options * options) {
     p->max_re_connection_times = options->max_re_connection_times ? options->max_re_connection_times : 10;
     uv_timer_init(p->loop, &p->wait_timer);
     uv_timer_init(p->loop, &p->re_connection_timer);
+    uv_unref((uv_handle_t *)&p->wait_timer);
     p->wait_timer.data = (void *)p;
     p->re_connection_timer.data = (void *)p;
     int socket_info_mem_size = sizeof(struct socketInfo *) * options->size;
@@ -82,6 +95,10 @@ struct pool * create_pool(uv_loop_t * loop, struct pool_options * options) {
     }
     memset(p->sockets, 0, socket_info_mem_size);
     return p;
+}
+
+struct socket_info * get_socket_info(struct pool * p, int id) {
+    return p->sockets[id];
 }
 
 // get a tcp connection from connection pool
@@ -97,27 +114,33 @@ int get_socket(struct pool * p) {
     return -1;
 }
 
+static void consume_socket(struct socket_info* si) {
+    struct pool * p = si->p;
+    struct node * n = p->wait;
+    if (n) {
+        p->wait = n->next;
+        n->cb(OK, si->index);
+        free(n);
+    }
+    if (p->wait == NULL) {
+        uv_timer_stop(&p->wait_timer);
+    } else {
+        update_wait_timer(p);
+    }
+}
 
 static void connect_cb(uv_connect_t* req, int status) {
-    struct socket_info* si = (struct socket_info*)req->handle->data;
+    struct socket_info* si = (struct socket_info*)req->data;
     struct pool * p = si->p;
     if (status == 0) {
+        p->use++;
         si->state = CONNECTED;
-        struct node * n = p->wait;
-        if (n) {
-            p->wait = n->next;
-            n->cb(OK, si->index);
-            free(n);
-            update_wait_timer(p);
-        }
+        consume_socket(si);
     } else {
         p->sockets[si->index] = NULL;
         free(si->socket);
         free(si);
-        if (p->max_re_connection_times > 0) {
-            p->max_re_connection_times--;
-            start_connect(p);
-        }
+        start_re_connection_timer(p);
     }
     free(req);
 }
@@ -129,11 +152,12 @@ static void start_connect(struct pool* p) {
             struct socket_info * si;
             uv_tcp_t* socket;
             uv_connect_t* connect;
-            si = (struct socket_info *)malloc(sizeof(struct socket_info *));
+            si = (struct socket_info *)malloc(sizeof(struct socket_info));
             if (si == NULL) {
                 goto NO_MEM_ERROR;
             }
             socket = (uv_tcp_t*)malloc(sizeof(uv_tcp_t));
+            
             if (socket == NULL) {
                 goto NO_MEM_ERROR;
             }
@@ -148,8 +172,10 @@ static void start_connect(struct pool* p) {
             si->index = i;
             si->state = CONNECTING;
             p->sockets[i] = si;
+            connect->data = (void *)si;
             uv_ip4_addr(p->host, p->port, &dest);
             uv_tcp_connect(connect, socket, (const struct sockaddr*)&dest, connect_cb); 
+            printf("%d", p->loop->active_handles);
             return;
 
         NO_MEM_ERROR:
@@ -202,6 +228,7 @@ int wait_socket(struct pool * p, get_socket_cb cb, uint64_t timeout) {
 int put_socket(struct pool *p, int id) {
     CHECK(p, id);
     p->sockets[id]->state = CONNECTED;
+    consume_socket(p->sockets[id]);
     return OK;
 }
 
@@ -209,8 +236,6 @@ static void close_cb(uv_handle_t* handle) {
     struct close_socket_ctx * ctx = (struct close_socket_ctx *)handle->data;
     struct socket_info * si = ctx->si;
     close_socket_cb cb = ctx->cb;
-    si->p->sockets[si->index] = NULL;
-    free(si->socket);
     free(handle);
     free(si);
     free(ctx);
@@ -222,12 +247,14 @@ static void close_cb(uv_handle_t* handle) {
 // close socket
 int close_socket(struct pool *p, int id, close_socket_cb cb) {
     CHECK(p, id);
-    struct socket_info* s = p->sockets[id];
+    struct socket_info* si = p->sockets[id];
+    p->sockets[si->index] = NULL;
     struct close_socket_ctx * ctx = (struct close_socket_ctx *)malloc(sizeof(struct close_socket_ctx));
     ctx->cb = cb;
-    ctx->si = s;
-    s->socket->data = (void*)ctx;
-    uv_close((uv_handle_t*)s->socket, close_cb);
+    ctx->si = si;
+    si->socket->data = (void*)ctx;
+    p->use--;
+    uv_close((uv_handle_t*)si->socket, close_cb);
     return OK;
 }
 
@@ -268,6 +295,7 @@ int read_socket(struct pool *p, int id, read_socket_cb cb) {
     struct socket_info* s = p->sockets[id];
     s->socket->data = (void *)cb;
     uv_read_start((uv_stream_t *)s->socket, alloc_cb, read_cb);
+    return OK;
 }
 
 static void write_cb(uv_write_t* req, int status) {
@@ -288,6 +316,7 @@ int write_socket(struct pool* p, int id, char * data, write_socket_cb cb) {
     }
     write_req->data = (void *)cb;
     uv_write(write_req, (uv_stream_t *)s->socket, &buf, 1, write_cb);
+    return OK;
 }
 
 int attach_ctx(struct pool* p, int id, void * ctx) {
